@@ -1,0 +1,385 @@
+---
+title: "Lab2 Final Report: <br> A Study on the Dynamics of Working Hours Against Age and Covariates"
+author: "Miles, Omar, Xueying "
+date: "2024-04-12"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+library(sandwich)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(GGally)
+library(RColorBrewer)
+library(stargazer)
+library(ggfortify)
+library(lmtest)
+library(car)
+```
+
+## Introduction
+
+A nationwide pandemic has changed people’s working styles and brought the “work-life balance” topic to the public’s attention. The discussion on how generations (Baby Boomers, Gen Xers, Millenniums, Gen Zers) value work-life balance continues. What are the working hours that people value the most? Which features do different generations consider when deciding on the time they’re willing to allocate to work?
+
+This research aims to uncover the dynamics of working hours in generations and explores the extensive relationship between working hours, age, and other covariates that may influence typical weekly hours worked. Potential relevant features studied in this research include: income, sex, marital status, number of children, job type (self-employment or not), and residence location 
+(at age 16). We analyzed various model specifications by evaluating global F-test, R\^2, residual standard error as well as each explanatory variables t-test and coefficient value and direction. We begin with a simple functional form where hours worked is modeled as a function age and iteratively add and test the addition of variables and their impact on model results and diagnostics.
+
+## Data Source and Transformation
+
+The research is based on a data set extracted from the [General Social Survey](https://gssdataexplorer.norc.org/variables/vfilter) (GSS).The original data set includes 72390 observations and 13 variables.
+
+We converted the categorical variables to more descriptive levels from their integer mappings for use in regression analysis. For instance, different marital statuses were labeled with integers ranging from one to five and they were converted to “Married”, “Windowed”, “Divorced”, “Separated” and “Never married” using the data dictionary provided by GSS. Both categorical and continuous variables were filtered to remove non-response related observations. By filtering out the invalid answers, such as “Do not Know/Cannot Choose” and “No answer“, we condense the data set into 1177 observations. The features spouse working hours `SPHRS` is tenure in occupation while `YEARSJOB` is the number of years in occupation. These two variables are not included in our model due to lack of enough data points and the potential biases including these variables may have imposed on our sample.
+
+Here is a brief summary of the initial set of variables used in model testing:
+
+| Variable | Description                                          |
+|----------|------------------------------------------------------|
+| HRS2     | number of hours worked in a typical week             |
+| AGE      | age of respondent                                    |
+| RINCOME  | income of respondent                                 |
+| CHILDS   | number of respondent children                        |
+| SEX      | gender of respondent                                 |
+| WRKSLF   | indicates either self-employment or work for someone |
+| MARITIAL | martial status                                       |
+| REG16    | region of residence at age 16                        |
+
+
+## Operationalization
+
+Our objective is to explore the relationship between hours worked and age and in doing so effectively explain the potential causes of variation in hours worked. Further, we would like to understand if there is an age at which the number of hours worked begins to decline. Given there are a number of other covariates that may affect this relationship, we produce multiple models with various functional forms to identify which regressors best explain the variability in hours worked. 
+
+We define our regressand as `HRS2` the typical number of hours worked per week. In addition to `AGE` other covariates in presented models include: `SEX`; `CHILDS`,  `RINCOME`. Additional variables evaluated in preliminary models (not presented) include: `WRKSLF`, `MARITAL` and `REG16`. We constrain our sample data to respondents who provided a valid response for all the variables considered, this may introduce some level of bias, for example, some respondents who may be in lower or higher income tranches may choose not to report their income and in doing so they were eliminated from the sample. Another limitation relates to `HRS2`, as this is the typical number of hours worked by the respondent there is no viable way to control or analyze the seasonal effects of hours worked.
+
+
+
+```{r data prep, results="hide", echo = FALSE }
+setwd("C:/Users/miles/Downloads/model_1/batch_0/result")
+
+  read.dct <- function(dct, labels.included = "yes") {
+      temp <- readLines(dct)
+      temp <- temp[grepl("_column", temp)]
+      switch(labels.included,
+             yes = {
+                 pattern <- "_column\\(([0-9]+)\\)\\s+([a-z0-9]+)\\s+(.*)\\s+%([0-9]+)[a-z]\\s+(.*)"
+                 classes <- c("numeric", "character", "character", "numeric", "character")
+                 N <- 5
+                 NAMES <- c("StartPos", "Str", "ColName", "ColWidth", "ColLabel")
+             },
+             no = {
+                 pattern <- "_column\\(([0-9]+)\\)\\s+([a-z0-9]+)\\s+(.*)\\s+%([0-9]+).*"
+                 classes <- c("numeric", "character", "character", "numeric")
+                 N <- 4
+                 NAMES <- c("StartPos", "Str", "ColName", "ColWidth")
+             })
+      temp_metadata <- setNames(lapply(1:N, function(x) {
+          out <- gsub(pattern, paste("\\", x, sep = ""), temp)
+          out <- gsub("^\\s+|\\s+$", "", out)
+          out <- gsub('\"', "", out, fixed = TRUE)
+          class(out) <- classes[x] ; out }), NAMES)
+      temp_metadata[["ColName"]] <- make.names(gsub("\\s", "", temp_metadata[["ColName"]]))
+      temp_metadata
+  }
+
+  read.dat <- function(dat, metadata_var, labels.included = "yes") {
+      read.table(dat, col.names = metadata_var[["ColName"]])
+  }
+
+
+GSS_metadata <- read.dct("GSS.dct")
+GSS_ascii <- read.dat("GSS.dat", GSS_metadata)
+attr(GSS_ascii, "col.label") <- GSS_metadata[["ColLabel"]]
+GSS <- GSS_ascii
+
+# Relabel char features: sex, wrkslf, marital, reg16, rincome, yearsjob
+gss_filtered = GSS %>%
+  mutate(SEX = case_when(
+    SEX == 1 ~ "Male",
+    SEX == 2 ~ "Female",
+    TRUE ~ NA
+  ),
+  WRKSLF = case_when(
+    WRKSLF == 1 ~ "Self-employed",
+    WRKSLF == 2 ~ "Someone-else",
+    TRUE ~ NA
+  ),
+  MARITAL = case_when(
+    MARITAL == 1 ~ "Married",
+    MARITAL == 2 ~ "Widowed",
+    MARITAL == 3 ~ "Divorced",
+    MARITAL == 4 ~ "Separated",
+    MARITAL == 5 ~ "Never married",
+    TRUE ~ NA
+  ),
+  REG16 = case_when(
+    REG16 == 9 ~ "PACIFIC",
+    REG16 == 8 ~ "MOUNTAIN",
+    REG16 == 7 ~ "W. SOU. CENTRAL",
+    REG16 == 6 ~ "E. SOU. CENTRAL",
+    REG16 == 5 ~ "SOUTH ATLANTIC",
+    REG16 == 4 ~ "W. NOR. CENTRAL",
+    REG16 == 3 ~ "E. NOR. CENTRAL",
+    REG16 == 2 ~ "MIDDLE ATLANTIC",
+    REG16 == 1 ~ "NEW ENGLAND",
+    REG16 == 0 ~ "FOREIGN",
+    TRUE ~ NA
+  ),
+  RINCOME = case_when(
+    RINCOME == 12 ~ "$25000 OR MORE",
+    RINCOME == 11 ~ "$20000 - 24999",
+    RINCOME == 10 ~ "$15000 - 19999",
+    RINCOME == 9 ~ "$10000 - 14999",
+    RINCOME == 8 ~ "$8000 TO 9999",
+    RINCOME == 7 ~ "$7000 TO 7999",
+    RINCOME == 6 ~ "$6000 TO 6999",
+    RINCOME == 5 ~ "$5000 TO 5999",
+    RINCOME == 4 ~ "$4000 TO 4999",
+    RINCOME == 3 ~ "$3000 TO 3999",
+    RINCOME == 2 ~ "$1000 TO 2999",
+    RINCOME == 1 ~ "LT $1000",
+    TRUE ~ NA
+  )
+)
+ 
+GSS %>% head()
+
+```
+
+```{r Creating Model Data, results="hide", echo=FALSE, warning=FALSE, message=FALSE}
+## creating sample data
+## without the following vars: SPHRS2 & YEARSJOB
+
+# create model data 
+num_cols = c("AGE", "HRS2", "CHILDS")
+cat_cols = c("SEX", 	"WRKSLF",	"MARITAL", "REG16",	"RINCOME")
+
+
+mod_data = gss_filtered %>% 
+  select(all_of(c(num_cols, cat_cols)))%>%
+  filter(
+  gss_filtered$AGE >= 0,
+  gss_filtered$HRS2 >= 0,
+  gss_filtered$CHILDS >= 0,
+  gss_filtered$SEX %in% c("Male","Female"),
+  gss_filtered$WRKSLF %in% c("Self-employed", "Someone-else"),
+  is.na(gss_filtered$MARITAL) == F,
+  is.na(gss_filtered$REG16) == F,
+  is.na(gss_filtered$RINCOME) == F,
+)
+
+
+## creating model data
+## without the following vars: SPHRS2 & YEARSJOB
+
+# create model data 
+num_cols = c("AGE", "HRS2", "CHILDS")
+cat_cols = c("SEX", 	"WRKSLF",	"MARITAL",	"RINCOME")
+
+mod_data = mod_data %>% 
+  select(all_of(c(num_cols, cat_cols)))
+
+##  create train test split only for inital testing we will also run CV after we define our model specs 
+#### 75% of the sample size
+smp_size <- floor(0.75 * nrow(mod_data))
+
+#### set the seed to make your partition reproducible
+set.seed(123)
+train_ind <- sample(seq_len(nrow(mod_data)), size = smp_size)
+
+#### creating train test data
+train <- mod_data[train_ind, ]
+test <- mod_data[-train_ind, ]
+
+#train%>%count() #882
+#test %>% count() #295
+
+
+```
+
+
+### Model Specification
+Given the large data size, we have opted for ordinary least squares (OLS) regression as our primary modeling technique. OLS regression is suitable for the research question as it allows us to assess the linear relationship between our dependent variable (hours worked per week) and the independent variables (age and additional covariants). Additionally, OLS regression provides interpretable coefficients that allow us to quantify the impact of each covariant on the outcome variable. Our initial data exploration led us to conclude, as age increases, hours worked tends to decline. In general this fits our understanding of the "real world". We also assume people with more children may work more hours to compensate for the additional financial burden of dependents. As it relates to income, we assume those who make more may have greater incentive to work more hours prior to nearing retirement age.
+
+We have carefully chosen a set of covariates that are likely to influence the number of hours worked per week, given our sample. Other covariates not included, out of our initial list, either did not prove to be individually or globally (F-test) significant or were slightly significant (alpha of 0.15 or greater) but added minimal or no additional value for explaining the variation in hours worked. These covariates include: marital status, self-employed, and region. This does not coincide with our initial hypothesis, but we should acknowledge there are a number of outliers in the data that may be impacting these variables. Looking at the histogram of `HRS2` we see a large concentration of observations centered around 40 hours worked per week. Our initial models produced residual closer to zero for respondents who work about 40 hours per week but performed poorly on respondents who worked either far less or more than 40 hours per week. We attempted to remedy this by applying weights to the training observations such that observations that produced larger residuals in the un-weighted model had relatively less impact on our coefficient estimates. This reduced the impact of outliers on our fitted mode, broadly increased overall significance of the model and improved diagnostic results. Although not our goal, weighting had limited impact on improving out of sample error metrics.
+
+
+
+## Models
+
+
+```{r Models, echo=FALSE, warning=FALSE, message=FALSE, comment=NA}
+ 
+mod0 = lm(data = train, HRS2 ~ AGE)
+mod1 = lm(data = train, HRS2 ~ AGE + SEX)
+mod2 = lm(data = train, HRS2 ~ AGE + SEX + CHILDS)
+mod3 = lm(data = train, HRS2 ~ AGE + SEX + CHILDS + RINCOME)
+mod4 = lm(
+  data = train%>%mutate(RES = mod3$residuals,weights = 1/exp(abs(RES))),
+  HRS2 ~ AGE + SEX + CHILDS + RINCOME,
+  weights = 1/exp(abs(RES))
+)
+mod_list <- list(mod2, mod3, mod4)
+stargazer(
+mod_list,
+type = "text",
+single.row= TRUE,
+robust = TRUE,
+font.size = "footnotesize",
+column.sep.width = "1pt",
+digits=2,
+no.space = TRUE
+)
+
+
+```
+## Model Results and Interpretation
+Once the OLS regression model was fitted, we interpreted the coefficients of the independent variables to assess their impact on the hours worked per week. Specifically, we examined the magnitude and direction of the coefficients associated with age and covariants to understand their respective contributions to the variability in working hours. From the three models shown above, model four has the most promising results with a R-squared value of 0.87. This indicates that the model explains a substantial portion of the variance in the dependent variable. Both the age exhibits a negative coefficients, as anticipated. The sex of the individual is also statistically significant, indicating that being male is associated with an increase of 5.51 units in the dependent variable. The coefficient for the number of children indicates that the variable is statistically significant positive relationship with the number of working hours. For each additional child, the dependent variable increases by 0.57 units. The income categories represent different income brackets compared to a reference category. Each income category shows a statistically significant positive relationship with the dependent variable. The results also reveal that nearly all income brackets were individually significant. However, lower income brackets tend to have smaller coefficients aligning with our hypothesis that individuals with higher salaries have greater incentive to work longer. Worth noting that the largest income bracket is $25000 or more which limits our understanding of higher earners.
+
+## Discussion
+Five assumptions have to be met in order for the OLS regression to work. In real world, people's age might impact the number of kids and income level. Given the large sample size of GSS, we believe the data roughly follows IID. The variance inflation factor table displays low collinearity exists among the features. The residual plots against fitted values scattered around a horizontal line of y = 0, which proves the linear conditional expectation. Given the P-value from BP test and fitted vs residual plot, the top performing model proved to have relatively constant error variance. The quantile plot serves as the support of normally distributed errors. 
+
+We excluded the spouse working hours and tenure in occupation to have a sufficient sample size. As couples might coordinate the work schedule to shoulder family responsibilities, omitting spouse working hours, might cause an over-estimation of the estimators. The omitted variable, tenure in occupation, will probably lead to an over-estimate of the estimators, since it is likely to be positively related to age. Whether the cumulative bias will point towards or against zero requires further quantitative analysis.
+
+
+## Conclusion
+Our model points out that people tend to work longer hours earlier in their careers, males appear to work more hours than females (base on our sample) and individuals with greater salaries tend to work more hours than lower earners.
+
+
+### Diagnostics
+
+```{r Diagnostics, echo=FALSE, warning=FALSE, message=FALSE, comment=NA}
+
+
+mod4_plot = autoplot(mod4)
+gridExtra::grid.arrange(grobs = mod4_plot@plots, top = "HRS2 ~ AGE + SEX + CHILDS + RINCOME : WHT= 1/exp(abs(RES))")
+
+bptest(mod4)
+vif(mod4)
+```
+
+
+## Exploratory Data Analysis
+
+```{r EDA, echo=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = F)
+####### Work Hours vs Numerical Var Plots #########
+hrs_hist = mod_data %>%
+ggplot(aes(x= HRS2))+
+  geom_histogram(fill = "light blue" )+
+  scale_x_continuous(breaks=seq(0,90,10))+
+  #scale_y_continuous(breaks=seq(0,80, 10))+
+  ggtitle("Work Hours")+
+  theme(
+    #axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+  )
+
+
+hrs_vs_age = mod_data %>%
+  ggplot(aes(y= HRS2, x = AGE))+
+  geom_jitter(color = "light blue" )+
+  geom_smooth(method = 'lm', se= F) +
+  scale_x_continuous(breaks=seq(0,90,10))+
+  scale_y_continuous(breaks=seq(0,90, 10))+
+  ggtitle("Work Hours vs Age")+
+  theme(
+    #axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+  )
+
+
+hrs_vs_childs = mod_data %>%
+  ggplot(aes(y= HRS2, x = CHILDS))+
+  geom_jitter(color = "light blue" )+
+  geom_smooth(method = 'lm', se= F) +
+  scale_x_continuous(breaks=seq(0,10, 1))+
+  scale_y_continuous(breaks=seq(0,90, 10))+
+  ggtitle("Work Hours vs Children")+
+  theme(
+    #axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+  )
+
+
+##### Work Hrs vs Categorical Var Plots #####
+sex_box = mod_data %>%
+  ggplot(aes(x = HRS2 ))+
+  geom_boxplot(aes(fill = SEX))+
+  scale_x_continuous(breaks=seq(0,90,10))+
+  coord_flip()+
+  ggtitle("Work Hours vs Sex")+
+  theme(
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank(),
+    #axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+  )+scale_fill_brewer(palette = "Blues")
+
+
+
+wrkslf_box <- mod_data %>%
+  ggplot(aes(x = HRS2 ))+
+  geom_boxplot(aes(fill = WRKSLF))+
+  scale_x_continuous(breaks=seq(0,90,10))+
+  coord_flip()+
+  ggtitle("Work Hours vs Employer")+
+  theme(
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank(),
+    #axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+  )+scale_fill_brewer(palette = "Blues")
+
+marital_box <- mod_data %>%
+  ggplot(aes(x = HRS2 ))+
+  geom_boxplot(aes(fill = MARITAL))+
+  scale_x_continuous(breaks=seq(0,90,10))+
+  coord_flip()+
+  ggtitle("Work Hours vs Marital Stat")+
+  theme(
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank(),
+    #axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+  )+scale_fill_brewer(palette = "Blues")
+
+
+reg16_box <- mod_data %>%
+  ggplot(aes(x = HRS2 ))+
+  geom_boxplot(aes(fill = REG16))+
+  scale_x_continuous(breaks=seq(0,90,10))+
+  coord_flip()+
+  ggtitle("Work Hours vs Region")+
+  theme(
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank(),
+    #axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+  )+scale_fill_brewer(palette = "Blues")
+
+income_box <- mod_data %>%
+  ggplot(aes(x = HRS2 ))+
+  geom_boxplot(aes(fill = RINCOME))+
+  scale_x_continuous(breaks=seq(0,90,10))+
+  coord_flip()+
+  ggtitle("Work Hours vs Income")+
+  theme(
+    axis.title.x=element_blank(),
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank(),
+    #axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5),
+  )+scale_fill_brewer(palette = "Blues")
+
+
+# need to export with width of 1400 w 1000 h
+(hrs_hist | hrs_vs_age | hrs_vs_childs )
+#(wrkslf_box | marital_box) #not enough room for all plots
+(sex_box | income_box) 
+
+```
